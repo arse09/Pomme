@@ -105,14 +105,17 @@ impl Renderer {
 
     pub fn update_camera(&mut self, input: &mut InputState) {
         self.camera.update_look(input);
-        let uniform = CameraUniform::from_camera(&self.camera);
-        self.chunk_pipeline.update_camera(&self.ctx.queue, &uniform);
+        self.flush_camera();
     }
 
     pub fn sync_camera_to_player(&mut self, eye_pos: glam::Vec3, yaw: f32, pitch: f32) {
         self.camera.position = eye_pos;
         self.camera.yaw = yaw;
         self.camera.pitch = pitch;
+        self.flush_camera();
+    }
+
+    fn flush_camera(&mut self) {
         let uniform = CameraUniform::from_camera(&self.camera);
         self.chunk_pipeline.update_camera(&self.ctx.queue, &uniform);
     }
@@ -151,26 +154,7 @@ impl Renderer {
         window: &Window,
         hud_fn: impl FnMut(&egui::Context),
     ) -> Result<(), RendererError> {
-        let raw_input = self.egui_state.take_egui_input(window);
-        let full_output = self.egui_ctx.run(raw_input, hud_fn);
-
-        self.egui_state
-            .handle_platform_output(window, full_output.platform_output);
-
-        let tris = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
-
-        for (id, delta) in &full_output.textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
-        }
-
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.ctx.config.width, self.ctx.config.height],
-            pixels_per_point: full_output.pixels_per_point,
-        };
-
+        let prepared = self.prepare_egui(window, hud_fn);
         let output = self.ctx.surface.get_current_texture()?;
         let view = output
             .texture
@@ -214,43 +198,8 @@ impl Renderer {
             self.chunk_pipeline.draw(&mut render_pass);
         }
 
-        let hud_commands = self.egui_renderer.update_buffers(
-            &self.ctx.device,
-            &self.ctx.queue,
-            &mut encoder,
-            &tris,
-            &screen,
-        );
-
-        {
-            let mut render_pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("hud_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                })
-                .forget_lifetime();
-
-            self.egui_renderer.render(&mut render_pass, &tris, &screen);
-        }
-
-        let mut submit: Vec<wgpu::CommandBuffer> = hud_commands;
-        submit.push(encoder.finish());
-        self.ctx.queue.submit(submit);
+        self.finish_egui(prepared, &view, wgpu::LoadOp::Load, encoder);
         output.present();
-
-        for id in &full_output.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
 
         Ok(())
     }
@@ -260,6 +209,35 @@ impl Renderer {
         window: &Window,
         ui_fn: impl FnMut(&egui::Context),
     ) -> Result<(), RendererError> {
+        let prepared = self.prepare_egui(window, ui_fn);
+        let output = self.ctx.surface.get_current_texture()?;
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let encoder = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui_encoder"),
+            });
+
+        self.finish_egui(
+            prepared,
+            &view,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            encoder,
+        );
+        output.present();
+
+        Ok(())
+    }
+
+    fn prepare_egui(
+        &mut self,
+        window: &Window,
+        ui_fn: impl FnMut(&egui::Context),
+    ) -> PreparedEgui {
         let raw_input = self.egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, ui_fn);
 
@@ -280,24 +258,26 @@ impl Renderer {
             pixels_per_point: full_output.pixels_per_point,
         };
 
-        let output = self.ctx.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        PreparedEgui {
+            tris,
+            screen,
+            free_textures: full_output.textures_delta.free,
+        }
+    }
 
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("egui_encoder"),
-            });
-
+    fn finish_egui(
+        &mut self,
+        prepared: PreparedEgui,
+        view: &wgpu::TextureView,
+        load_op: wgpu::LoadOp<wgpu::Color>,
+        mut encoder: wgpu::CommandEncoder,
+    ) {
         let commands = self.egui_renderer.update_buffers(
             &self.ctx.device,
             &self.ctx.queue,
             &mut encoder,
-            &tris,
-            &screen,
+            &prepared.tris,
+            &prepared.screen,
         );
 
         {
@@ -305,10 +285,10 @@ impl Renderer {
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("egui_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            load: load_op,
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -318,20 +298,24 @@ impl Renderer {
                 })
                 .forget_lifetime();
 
-            self.egui_renderer.render(&mut render_pass, &tris, &screen);
+            self.egui_renderer
+                .render(&mut render_pass, &prepared.tris, &prepared.screen);
         }
 
         let mut submit: Vec<wgpu::CommandBuffer> = commands;
         submit.push(encoder.finish());
         self.ctx.queue.submit(submit);
-        output.present();
 
-        for id in &full_output.textures_delta.free {
+        for id in &prepared.free_textures {
             self.egui_renderer.free_texture(id);
         }
-
-        Ok(())
     }
+}
+
+struct PreparedEgui {
+    tris: Vec<egui::ClippedPrimitive>,
+    screen: egui_wgpu::ScreenDescriptor,
+    free_textures: Vec<egui::TextureId>,
 }
 
 fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {

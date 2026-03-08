@@ -1900,6 +1900,7 @@ dependencies = [
  "azalea-core",
  "azalea-crypto",
  "azalea-entity",
+ "azalea-inventory",
  "azalea-protocol",
  "azalea-registry",
  "azalea-world",

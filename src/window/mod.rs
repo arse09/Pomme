@@ -18,6 +18,7 @@ use crate::renderer::chunk::mesher::MeshDispatcher;
 use crate::renderer::Renderer;
 use crate::ui::chat::ChatState;
 use crate::ui::hud;
+use crate::ui::inventory::{self, InventoryTextures};
 use crate::ui::menu::{MainMenu, MenuAction};
 use crate::ui::pause::{self, PauseAction};
 use crate::world::chunk::ChunkStore;
@@ -41,6 +42,7 @@ enum GameState {
 }
 
 const TICK_RATE: f32 = 1.0 / 20.0;
+const VIEW_DISTANCE: u32 = 8;
 
 struct App {
     window: Option<Arc<Window>>,
@@ -59,8 +61,10 @@ struct App {
     tick_accumulator: f32,
     prev_player_pos: glam::Vec3,
     hud_textures: Option<hud::HudTextures>,
+    inventory_textures: Option<InventoryTextures>,
     mesh_dispatcher: Option<MeshDispatcher>,
     paused: bool,
+    inventory_open: bool,
     chat: ChatState,
 }
 
@@ -87,7 +91,7 @@ impl App {
             last_frame: None,
             net_events,
             chat_sender,
-            chunk_store: ChunkStore::new(8),
+            chunk_store: ChunkStore::new(VIEW_DISTANCE),
             assets_dir,
             position_set: false,
             state,
@@ -97,8 +101,10 @@ impl App {
             tick_accumulator: 0.0,
             prev_player_pos: glam::Vec3::ZERO,
             hud_textures: None,
+            inventory_textures: None,
             mesh_dispatcher: None,
             paused: false,
+            inventory_open: false,
             chat: ChatState::new(),
         }
     }
@@ -107,6 +113,7 @@ impl App {
         let Some(window) = &self.window else { return };
         let captured = matches!(self.state, GameState::InGame)
             && !self.paused
+            && !self.inventory_open
             && !self.chat.is_open()
             && self.input.is_cursor_captured();
         if captured {
@@ -194,6 +201,12 @@ impl App {
                     self.player.food = food;
                     self.player.saturation = saturation;
                 }
+                NetworkEvent::InventoryContent { items } => {
+                    self.player.inventory.set_contents(items);
+                }
+                NetworkEvent::InventorySlot { index, item } => {
+                    self.player.inventory.set_slot(index as usize, item);
+                }
                 NetworkEvent::ChatMessage { text } => {
                     self.chat.push_message(text);
                 }
@@ -253,6 +266,10 @@ impl ApplicationHandler for App {
             renderer.egui_ctx(),
             &self.assets_dir,
         ));
+        self.inventory_textures = Some(InventoryTextures::load(
+            renderer.egui_ctx(),
+            &self.assets_dir,
+        ));
         self.mesh_dispatcher = Some(renderer.create_mesh_dispatcher());
         self.renderer = Some(renderer);
         self.window = Some(window);
@@ -265,7 +282,7 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if matches!(self.state, GameState::Menu) || self.paused || self.chat.is_open() {
+        if matches!(self.state, GameState::Menu) || self.paused || self.chat.is_open() || self.inventory_open {
             if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
                 let response = renderer.handle_window_event(window, &event);
                 if response.consumed && !matches!(event, WindowEvent::RedrawRequested) {
@@ -291,18 +308,26 @@ impl ApplicationHandler for App {
                                 KeyCode::Escape => {
                                     if self.chat.is_open() {
                                         self.chat.close();
+                                    } else if self.inventory_open {
+                                        self.inventory_open = false;
                                     } else {
                                         self.paused = !self.paused;
                                     }
                                     self.apply_cursor_grab();
                                 }
-                                KeyCode::KeyT | KeyCode::Enter
+                                KeyCode::KeyE
                                     if !self.paused && !self.chat.is_open() =>
+                                {
+                                    self.inventory_open = !self.inventory_open;
+                                    self.apply_cursor_grab();
+                                }
+                                KeyCode::KeyT | KeyCode::Enter
+                                    if !self.paused && !self.chat.is_open() && !self.inventory_open =>
                                 {
                                     self.chat.open();
                                     self.apply_cursor_grab();
                                 }
-                                KeyCode::Slash if !self.paused && !self.chat.is_open() => {
+                                KeyCode::Slash if !self.paused && !self.chat.is_open() && !self.inventory_open => {
                                     self.chat.open_with_slash();
                                     self.apply_cursor_grab();
                                 }
@@ -310,13 +335,13 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
-                    if !self.paused && !self.chat.is_open() {
+                    if !self.paused && !self.chat.is_open() && !self.inventory_open {
                         self.input.on_key_event(&event);
                     }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if matches!(self.state, GameState::InGame) {
+                if matches!(self.state, GameState::InGame) && !self.inventory_open {
                     let scroll = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                         winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
@@ -369,7 +394,7 @@ impl ApplicationHandler for App {
                             }
                         }
 
-                        if !self.paused {
+                        if !self.paused && !self.inventory_open {
                             if let Some(renderer) = &mut self.renderer {
                                 renderer.update_camera(&mut self.input);
                             }
@@ -397,9 +422,13 @@ impl ApplicationHandler for App {
                             let health = self.player.health;
                             let food = self.player.food;
                             let hud_textures = &self.hud_textures;
+                            let inv_textures = &self.inventory_textures;
+                            let inv_open = self.inventory_open;
+                            let player_inv = &self.player.inventory;
                             let chat = &mut self.chat;
                             let mut pause_action = PauseAction::None;
                             let mut chat_msg = None;
+                            let mut close_inventory = false;
                             if let Err(e) = renderer.render_world(window, |ctx| {
                                 let screen = ctx.screen_rect();
                                 if let Some(textures) = hud_textures {
@@ -408,9 +437,19 @@ impl ApplicationHandler for App {
                                         pause_action = pause::draw_pause_menu(ctx, textures);
                                     }
                                 }
+                                if inv_open {
+                                    if let Some(textures) = inv_textures {
+                                        close_inventory = inventory::draw_inventory(ctx, textures, player_inv);
+                                    }
+                                }
                                 chat_msg = chat.draw(ctx, screen);
                             }) {
                                 log::error!("Render error: {e}");
+                            }
+
+                            if close_inventory {
+                                self.inventory_open = false;
+                                self.apply_cursor_grab();
                             }
 
                             if let Some(msg) = chat_msg {
@@ -428,7 +467,7 @@ impl ApplicationHandler for App {
                                     self.state = GameState::Menu;
                                     self.paused = false;
                                     self.position_set = false;
-                                    self.chunk_store = ChunkStore::new(8);
+                                    self.chunk_store = ChunkStore::new(VIEW_DISTANCE);
                                     if let Some(renderer) = &mut self.renderer {
                                         renderer.clear_chunk_meshes();
                                         self.mesh_dispatcher =
@@ -460,7 +499,7 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            if self.input.is_cursor_captured() && !self.paused && !self.chat.is_open() {
+            if self.input.is_cursor_captured() && !self.paused && !self.inventory_open && !self.chat.is_open() {
                 self.input.on_mouse_motion(delta);
             }
         }

@@ -5,6 +5,7 @@ pub mod sender;
 use std::sync::Arc;
 
 use azalea_core::position::ChunkPos;
+use azalea_inventory::ItemStack;
 use azalea_world::heightmap::HeightmapKind;
 
 pub enum NetworkEvent {
@@ -32,6 +33,13 @@ pub enum NetworkEvent {
         health: f32,
         food: u32,
         saturation: f32,
+    },
+    InventoryContent {
+        items: Vec<ItemStack>,
+    },
+    InventorySlot {
+        index: u16,
+        item: ItemStack,
     },
     ChatMessage {
         text: String,

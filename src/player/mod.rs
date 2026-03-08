@@ -1,4 +1,8 @@
+pub mod inventory;
+
 use glam::Vec3;
+
+use inventory::Inventory;
 
 pub struct LocalPlayer {
     pub position: Vec3,
@@ -9,6 +13,7 @@ pub struct LocalPlayer {
     pub health: f32,
     pub food: u32,
     pub saturation: f32,
+    pub inventory: Inventory,
 }
 
 impl LocalPlayer {
@@ -22,6 +27,7 @@ impl LocalPlayer {
             health: 20.0,
             food: 20,
             saturation: 5.0,
+            inventory: Inventory::new(),
         }
     }
 }

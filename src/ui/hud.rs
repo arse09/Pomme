@@ -2,11 +2,17 @@ use std::path::Path;
 
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2};
 
-const GUI_SCALE: f32 = 2.0;
+pub const GUI_SCALE: f32 = 2.0;
 const CROSSHAIR_SIZE: f32 = 10.0;
 const CROSSHAIR_THICKNESS: f32 = 2.0;
 pub const BUTTON_GAP: f32 = 8.0;
-const UV_FULL: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+pub const UV_FULL: Rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+pub const NEAREST_FILTER: TextureOptions = TextureOptions {
+    magnification: egui::TextureFilter::Nearest,
+    minification: egui::TextureFilter::Nearest,
+    wrap_mode: egui::TextureWrapMode::ClampToEdge,
+    mipmap_mode: None,
+};
 
 pub struct HudTextures {
     hotbar: TextureHandle,
@@ -25,31 +31,25 @@ impl HudTextures {
     pub fn load(ctx: &egui::Context, assets_dir: &Path) -> Self {
         let gui_dir = assets_dir.join("assets/minecraft/textures/gui/sprites");
 
-        let opts = TextureOptions {
-            magnification: egui::TextureFilter::Nearest,
-            minification: egui::TextureFilter::Nearest,
-            ..Default::default()
-        };
-
         let hud = gui_dir.join("hud");
         let heart = hud.join("heart");
 
         Self {
-            hotbar: load_texture(ctx, &hud.join("hotbar.png"), "hotbar", opts),
-            hotbar_selection: load_texture(ctx, &hud.join("hotbar_selection.png"), "hotbar_sel", opts),
-            button: load_texture(ctx, &gui_dir.join("widget/button.png"), "button", opts),
-            button_highlighted: load_texture(ctx, &gui_dir.join("widget/button_highlighted.png"), "button_hl", opts),
-            heart_container: load_texture(ctx, &heart.join("container.png"), "heart_bg", opts),
-            heart_full: load_texture(ctx, &heart.join("full.png"), "heart_full", opts),
-            heart_half: load_texture(ctx, &heart.join("half.png"), "heart_half", opts),
-            food_empty: load_texture(ctx, &hud.join("food_empty.png"), "food_bg", opts),
-            food_full: load_texture(ctx, &hud.join("food_full.png"), "food_full", opts),
-            food_half: load_texture(ctx, &hud.join("food_half.png"), "food_half", opts),
+            hotbar: load_texture(ctx, &hud.join("hotbar.png"), "hotbar", NEAREST_FILTER),
+            hotbar_selection: load_texture(ctx, &hud.join("hotbar_selection.png"), "hotbar_sel", NEAREST_FILTER),
+            button: load_texture(ctx, &gui_dir.join("widget/button.png"), "button", NEAREST_FILTER),
+            button_highlighted: load_texture(ctx, &gui_dir.join("widget/button_highlighted.png"), "button_hl", NEAREST_FILTER),
+            heart_container: load_texture(ctx, &heart.join("container.png"), "heart_bg", NEAREST_FILTER),
+            heart_full: load_texture(ctx, &heart.join("full.png"), "heart_full", NEAREST_FILTER),
+            heart_half: load_texture(ctx, &heart.join("half.png"), "heart_half", NEAREST_FILTER),
+            food_empty: load_texture(ctx, &hud.join("food_empty.png"), "food_bg", NEAREST_FILTER),
+            food_full: load_texture(ctx, &hud.join("food_full.png"), "food_full", NEAREST_FILTER),
+            food_half: load_texture(ctx, &hud.join("food_half.png"), "food_half", NEAREST_FILTER),
         }
     }
 }
 
-fn load_texture(
+pub fn load_texture(
     ctx: &egui::Context,
     path: &Path,
     name: &str,

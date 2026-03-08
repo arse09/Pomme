@@ -56,6 +56,21 @@ pub fn handle_game_packet(
                 },
             ));
         }
+        ClientboundGamePacket::ContainerSetContent(p) => {
+            if p.container_id == 0 {
+                let _ = event_tx.try_send(NetworkEvent::InventoryContent {
+                    items: p.items.clone(),
+                });
+            }
+        }
+        ClientboundGamePacket::ContainerSetSlot(p) => {
+            if p.container_id == 0 || p.container_id == -2 {
+                let _ = event_tx.try_send(NetworkEvent::InventorySlot {
+                    index: p.slot,
+                    item: p.item_stack.clone(),
+                });
+            }
+        }
         ClientboundGamePacket::SetHealth(p) => {
             let _ = event_tx.try_send(NetworkEvent::PlayerHealth {
                 health: p.health,
