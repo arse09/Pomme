@@ -8,6 +8,11 @@ use super::hud::NEAREST_FILTER;
 
 use crate::assets::{load_image, AssetIndex};
 
+pub struct RotatedText {
+    pub pivot: Pos2,
+    pub angle: f32,
+}
+
 const GRID_COLS: u32 = 16;
 const GRID_ROWS: u32 = 16;
 
@@ -145,37 +150,35 @@ impl McFont {
         text: &str,
         scale: f32,
         color: Color32,
-        shadow: bool,
-        pivot: Pos2,
-        angle: f32,
+        transform: RotatedText,
     ) {
-        if shadow {
-            let shadow_pos = Pos2::new(pos.x + 1.0, pos.y + 1.0);
-            self.draw_glyphs_rotated(painter, shadow_pos, text, scale, shadow_color(color), pivot, angle);
-        }
-        self.draw_glyphs_rotated(painter, pos, text, scale, color, pivot, angle);
+        let shadow_pos = Pos2::new(pos.x + 1.0, pos.y + 1.0);
+        self.emit_rotated_glyphs(painter, shadow_pos, text, scale, shadow_color(color), &transform);
+        self.emit_rotated_glyphs(painter, pos, text, scale, color, &transform);
     }
 
-    fn draw_glyphs_rotated(
+    fn emit_rotated_glyphs(
         &self,
         painter: &egui::Painter,
         mut pos: Pos2,
         text: &str,
         scale: f32,
         color: Color32,
-        pivot: Pos2,
-        angle: f32,
+        transform: &RotatedText,
     ) {
         let inner = &self.0;
         let tex_w = (inner.cell_w * GRID_COLS) as f32;
         let tex_h = (inner.cell_h * GRID_ROWS) as f32;
-        let cos = angle.cos();
-        let sin = angle.sin();
+        let cos = transform.angle.cos();
+        let sin = transform.angle.sin();
 
         let rotate = |p: Pos2| -> Pos2 {
-            let dx = p.x - pivot.x;
-            let dy = p.y - pivot.y;
-            Pos2::new(pivot.x + dx * cos - dy * sin, pivot.y + dx * sin + dy * cos)
+            let dx = p.x - transform.pivot.x;
+            let dy = p.y - transform.pivot.y;
+            Pos2::new(
+                transform.pivot.x + dx * cos - dy * sin,
+                transform.pivot.y + dx * sin + dy * cos,
+            )
         };
 
         for ch in text.chars() {

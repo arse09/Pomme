@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use egui::{Color32, Pos2, Rect, Vec2};
 
-use super::font::{mc_text, mc_text_width};
+use super::font::{mc_text, mc_text_width, RotatedText};
 use super::hud::{gui_scale, mc_button, mc_button_w, mc_icon_button, HudTextures, BUTTON_GAP, UV_FULL};
 use crate::assets::AssetIndex;
 
@@ -245,7 +245,8 @@ fn draw_splash(ui: &mut egui::Ui, text: &str, logo_rect: Rect, start_time: Insta
     if let Some(font) = super::font::McFont::get(ui.ctx()) {
         let w = font.text_width(text, font_scale);
         let pos = Pos2::new(center.x - w / 2.0, center.y - font_scale / 2.0);
-        font.draw_text_rotated(ui.painter(), pos, text, font_scale, yellow, true, center, rotation);
+        let transform = RotatedText { pivot: center, angle: rotation };
+        font.draw_text_rotated(ui.painter(), pos, text, font_scale, yellow, transform);
     }
 
     ui.ctx().request_repaint();
