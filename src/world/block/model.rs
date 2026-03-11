@@ -20,9 +20,20 @@ enum VariantEntry {
     Array(Vec<ModelRef>),
 }
 
+impl VariantEntry {
+    fn first(&self) -> Option<&ModelRef> {
+        match self {
+            VariantEntry::Single(r) => Some(r),
+            VariantEntry::Array(arr) => arr.first(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct MultipartCase {
     apply: MultipartApply,
+    #[allow(dead_code)]
+    when: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -32,16 +43,152 @@ enum MultipartApply {
     Array(Vec<ModelRef>),
 }
 
+impl MultipartApply {
+    fn first(&self) -> Option<&ModelRef> {
+        match self {
+            MultipartApply::Single(r) => Some(r),
+            MultipartApply::Array(arr) => arr.first(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct ModelRef {
     model: String,
+    #[serde(default)]
+    x: i32,
+    #[serde(default)]
+    y: i32,
+    #[serde(default)]
+    uvlock: bool,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 struct ModelFile {
     parent: Option<String>,
     #[serde(default)]
     textures: HashMap<String, String>,
+    #[serde(default)]
+    elements: Vec<ElementDef>,
+}
+
+#[derive(Deserialize, Clone)]
+struct ElementDef {
+    from: [f32; 3],
+    to: [f32; 3],
+    #[serde(default)]
+    rotation: Option<ElementRotation>,
+    #[serde(default)]
+    faces: HashMap<String, FaceDef>,
+    #[serde(default = "default_true")]
+    shade: bool,
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Deserialize, Clone)]
+struct ElementRotation {
+    origin: [f32; 3],
+    axis: String,
+    angle: f32,
+    #[serde(default)]
+    rescale: bool,
+}
+
+#[derive(Deserialize, Clone)]
+struct FaceDef {
+    uv: Option<[f32; 4]>,
+    texture: String,
+    cullface: Option<String>,
+    #[serde(default)]
+    rotation: Option<i32>,
+    #[serde(rename = "tintindex")]
+    tint_index: Option<i32>,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Direction {
+    Down, Up, North, South, West, East,
+}
+
+impl Direction {
+    pub fn offset(&self) -> [i32; 3] {
+        match self {
+            Direction::Down  => [ 0, -1,  0],
+            Direction::Up    => [ 0,  1,  0],
+            Direction::North => [ 0,  0, -1],
+            Direction::South => [ 0,  0,  1],
+            Direction::West  => [-1,  0,  0],
+            Direction::East  => [ 1,  0,  0],
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "down"  => Some(Direction::Down),
+            "up"    => Some(Direction::Up),
+            "north" => Some(Direction::North),
+            "south" => Some(Direction::South),
+            "west"  => Some(Direction::West),
+            "east"  => Some(Direction::East),
+            _ => None,
+        }
+    }
+
+    fn rotate_y(self, degrees: i32) -> Self {
+        let steps = ((degrees % 360 + 360) % 360) / 90;
+        let mut d = self;
+        for _ in 0..steps {
+            d = match d {
+                Direction::North => Direction::East,
+                Direction::East  => Direction::South,
+                Direction::South => Direction::West,
+                Direction::West  => Direction::North,
+                other => other,
+            };
+        }
+        d
+    }
+
+    fn rotate_x(self, degrees: i32) -> Self {
+        let steps = ((degrees % 360 + 360) % 360) / 90;
+        let mut d = self;
+        for _ in 0..steps {
+            d = match d {
+                Direction::North => Direction::Down,
+                Direction::Down  => Direction::South,
+                Direction::South => Direction::Up,
+                Direction::Up    => Direction::North,
+                other => other,
+            };
+        }
+        d
+    }
+
+    fn shade_light(&self) -> f32 {
+        match self {
+            Direction::Up    => 1.0,
+            Direction::Down  => 0.5,
+            Direction::North | Direction::South => 0.7,
+            Direction::East  | Direction::West  => 0.8,
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BakedQuad {
+    pub positions: [[f32; 3]; 4],
+    pub uvs: [[f32; 2]; 4],
+    pub texture: String,
+    pub cullface: Option<Direction>,
+    pub tinted: bool,
+    pub shade_light: f32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BakedModel {
+    pub quads: Vec<BakedQuad>,
+    pub is_full_cube: bool,
 }
 
 const FOLIAGE_TINTED: &[&str] = &[
@@ -57,41 +204,93 @@ pub fn load_all_block_textures(
     assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
 ) -> HashMap<String, FaceTextures> {
+    let mut results = HashMap::new();
+    let mut model_cache = HashMap::new();
+
+    for_each_blockstate(assets_dir, asset_index, |block_name, blockstate| {
+        let model_ref = extract_default_model_ref(blockstate)?;
+        let resolved = resolve_model(&model_ref.model, assets_dir, asset_index, &mut model_cache);
+        let face_textures = build_face_textures(block_name, &resolved.textures)?;
+        results.insert(block_name.to_string(), face_textures);
+        Some(())
+    });
+
+    log::info!("Loaded {} block texture mappings from vanilla assets", results.len());
+    results
+}
+
+pub fn bake_all_models(
+    assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+) -> HashMap<String, HashMap<String, BakedModel>> {
+    let mut results: HashMap<String, HashMap<String, BakedModel>> = HashMap::new();
+    let mut model_cache = HashMap::new();
+
+    for_each_blockstate(assets_dir, asset_index, |block_name, blockstate| {
+        let has_tint = determine_tint(block_name) != Tint::None;
+        let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
+
+        if let Some(variants) = &blockstate.variants {
+            for (variant_key, variant_entry) in variants {
+                let model_ref = variant_entry.first()?;
+                let resolved = resolve_model(&model_ref.model, assets_dir, asset_index, &mut model_cache);
+                if let Some(baked) = bake_resolved_model(&resolved, model_ref.x, model_ref.y, has_tint) {
+                    variants_map.insert(variant_key.clone(), baked);
+                }
+            }
+        } else if let Some(multipart) = &blockstate.multipart {
+            let mut combined_quads = Vec::new();
+            for case in multipart {
+                let model_ref = case.apply.first()?;
+                let resolved = resolve_model(&model_ref.model, assets_dir, asset_index, &mut model_cache);
+                if let Some(baked) = bake_resolved_model(&resolved, model_ref.x, model_ref.y, has_tint) {
+                    combined_quads.extend(baked.quads);
+                }
+            }
+            if !combined_quads.is_empty() {
+                let is_full_cube = check_full_cube(&combined_quads);
+                variants_map.insert(String::new(), BakedModel { quads: combined_quads, is_full_cube });
+            }
+        }
+
+        if !variants_map.is_empty() {
+            results.insert(block_name.to_string(), variants_map);
+        }
+        Some(())
+    });
+
+    log::info!("Baked models for {} blocks", results.len());
+    results
+}
+
+fn for_each_blockstate(
+    assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    mut callback: impl FnMut(&str, &BlockstateFile) -> Option<()>,
+) {
     let Some(blockstates_dir) = resolve_blockstates_dir(assets_dir, asset_index) else {
         log::warn!("Blockstates directory not found");
-        return HashMap::new();
+        return;
     };
 
     let entries = match std::fs::read_dir(&blockstates_dir) {
         Ok(e) => e,
         Err(e) => {
             log::warn!("Failed to read blockstates dir: {e}");
-            return HashMap::new();
+            return;
         }
     };
-
-    let mut results = HashMap::new();
-    let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
         if path.extension().and_then(|s| s.to_str()) != Some("json") { continue }
 
-        let block_name = name.to_string();
-
         let Ok(contents) = std::fs::read_to_string(&path) else { continue };
         let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(&contents) else { continue };
 
-        let Some(model_id) = extract_default_model(&blockstate) else { continue };
-        let resolved = resolve_textures(&model_id, assets_dir, asset_index, &mut model_cache);
-        let Some(face_textures) = build_face_textures(&block_name, &resolved) else { continue };
-
-        results.insert(block_name, face_textures);
+        callback(name, &blockstate);
     }
-
-    log::info!("Loaded {} block texture mappings from vanilla assets", results.len());
-    results
 }
 
 fn resolve_blockstates_dir(assets_dir: &Path, asset_index: &Option<AssetIndex>) -> Option<PathBuf> {
@@ -117,39 +316,33 @@ fn resolve_blockstates_dir(assets_dir: &Path, asset_index: &Option<AssetIndex>) 
     None
 }
 
-fn extract_default_model(blockstate: &BlockstateFile) -> Option<String> {
+fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
     if let Some(variants) = &blockstate.variants {
         let entry = variants.get("")
             .or_else(|| variants.values().next())?;
-        first_model_ref(entry)
+        let r = entry.first()?;
+        Some(ModelRef { model: r.model.clone(), x: r.x, y: r.y, uvlock: r.uvlock })
     } else if let Some(multipart) = &blockstate.multipart {
-        first_multipart_model(&multipart.first()?.apply)
+        let r = multipart.first()?.apply.first()?;
+        Some(ModelRef { model: r.model.clone(), x: r.x, y: r.y, uvlock: r.uvlock })
     } else {
         None
     }
 }
 
-fn first_model_ref(entry: &VariantEntry) -> Option<String> {
-    match entry {
-        VariantEntry::Single(r) => Some(r.model.clone()),
-        VariantEntry::Array(arr) => arr.first().map(|r| r.model.clone()),
-    }
+struct ResolvedModel {
+    textures: HashMap<String, String>,
+    elements: Vec<ElementDef>,
 }
 
-fn first_multipart_model(apply: &MultipartApply) -> Option<String> {
-    match apply {
-        MultipartApply::Single(r) => Some(r.model.clone()),
-        MultipartApply::Array(arr) => arr.first().map(|r| r.model.clone()),
-    }
-}
-
-fn resolve_textures(
+fn resolve_model(
     model_id: &str,
     assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     cache: &mut HashMap<String, ModelFile>,
-) -> HashMap<String, String> {
+) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
+    let mut elements: Option<Vec<ElementDef>> = None;
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
@@ -159,17 +352,25 @@ fn resolve_textures(
             texture_map.entry(key.clone()).or_insert_with(|| value.clone());
         }
 
+        if elements.is_none() && !model.elements.is_empty() {
+            elements = Some(model.elements.clone());
+        }
+
         match &model.parent {
             Some(parent) => current_id = parent.clone(),
             None => break,
         }
     }
 
-    let mut resolved = HashMap::new();
+    let mut resolved_textures = HashMap::new();
     for (key, value) in &texture_map {
-        resolved.insert(key.clone(), resolve_ref(value, &texture_map, 0));
+        resolved_textures.insert(key.clone(), resolve_ref(value, &texture_map, 0));
     }
-    resolved
+
+    ResolvedModel {
+        textures: resolved_textures,
+        elements: elements.unwrap_or_default(),
+    }
 }
 
 fn resolve_ref(value: &str, map: &HashMap<String, String>, depth: u32) -> String {
@@ -224,6 +425,218 @@ fn model_id_to_asset_key(model_id: &str) -> String {
 fn texture_to_name(texture_ref: &str) -> Option<&str> {
     let stripped = texture_ref.strip_prefix("minecraft:").unwrap_or(texture_ref);
     stripped.strip_prefix("block/")
+}
+
+fn bake_resolved_model(resolved: &ResolvedModel, rot_x: i32, rot_y: i32, has_tint: bool) -> Option<BakedModel> {
+    if resolved.elements.is_empty() {
+        return None;
+    }
+
+    let mut quads = Vec::new();
+
+    for element in &resolved.elements {
+        let from = [element.from[0] / 16.0, element.from[1] / 16.0, element.from[2] / 16.0];
+        let to = [element.to[0] / 16.0, element.to[1] / 16.0, element.to[2] / 16.0];
+
+        for (face_name, face_def) in &element.faces {
+            let Some(dir) = Direction::from_str(face_name) else { continue };
+
+            let texture_ref = resolve_ref(&face_def.texture, &resolved.textures, 0);
+            let Some(texture_name) = texture_to_name(&texture_ref) else { continue };
+
+            let positions = face_positions(dir, from, to);
+            let uvs = face_uvs(dir, from, to, face_def.uv.as_ref(), face_def.rotation);
+
+            let mut positions = apply_element_rotation(positions, &element.rotation);
+
+            let mut cullface = face_def.cullface.as_deref()
+                .and_then(Direction::from_str);
+
+            let shade_light = if element.shade { dir.shade_light() } else { 1.0 };
+            let tinted = has_tint && face_def.tint_index.is_some();
+
+            if rot_x != 0 || rot_y != 0 {
+                positions = rotate_positions(positions, rot_x, rot_y);
+                cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
+            }
+
+            quads.push(BakedQuad {
+                positions,
+                uvs,
+                texture: texture_name.to_string(),
+                cullface,
+                tinted,
+                shade_light,
+            });
+        }
+    }
+
+    if quads.is_empty() {
+        return None;
+    }
+
+    let is_full_cube = check_full_cube(&quads);
+    Some(BakedModel { quads, is_full_cube })
+}
+
+fn check_full_cube(quads: &[BakedQuad]) -> bool {
+    if quads.len() != 6 { return false; }
+    let mut dirs = [false; 6];
+    for q in quads {
+        match q.cullface {
+            Some(Direction::Down)  => dirs[0] = true,
+            Some(Direction::Up)    => dirs[1] = true,
+            Some(Direction::North) => dirs[2] = true,
+            Some(Direction::South) => dirs[3] = true,
+            Some(Direction::West)  => dirs[4] = true,
+            Some(Direction::East)  => dirs[5] = true,
+            None => return false,
+        }
+    }
+    dirs.iter().all(|&d| d)
+}
+
+fn face_positions(dir: Direction, from: [f32; 3], to: [f32; 3]) -> [[f32; 3]; 4] {
+    // CCW winding when viewed from outside, matching chunk pipeline backface culling
+    match dir {
+        Direction::Up => [
+            [from[0], to[1], to[2]],
+            [to[0],   to[1], to[2]],
+            [to[0],   to[1], from[2]],
+            [from[0], to[1], from[2]],
+        ],
+        Direction::Down => [
+            [from[0], from[1], from[2]],
+            [to[0],   from[1], from[2]],
+            [to[0],   from[1], to[2]],
+            [from[0], from[1], to[2]],
+        ],
+        Direction::North => [
+            [from[0], from[1], from[2]],
+            [from[0], to[1],   from[2]],
+            [to[0],   to[1],   from[2]],
+            [to[0],   from[1], from[2]],
+        ],
+        Direction::South => [
+            [to[0],   from[1], to[2]],
+            [to[0],   to[1],   to[2]],
+            [from[0], to[1],   to[2]],
+            [from[0], from[1], to[2]],
+        ],
+        Direction::West => [
+            [from[0], from[1], to[2]],
+            [from[0], to[1],   to[2]],
+            [from[0], to[1],   from[2]],
+            [from[0], from[1], from[2]],
+        ],
+        Direction::East => [
+            [to[0], from[1], from[2]],
+            [to[0], to[1],   from[2]],
+            [to[0], to[1],   to[2]],
+            [to[0], from[1], to[2]],
+        ],
+    }
+}
+
+fn face_uvs(dir: Direction, from: [f32; 3], to: [f32; 3], explicit_uv: Option<&[f32; 4]>, rotation: Option<i32>) -> [[f32; 2]; 4] {
+    let (u1, v1, u2, v2) = if let Some(uv) = explicit_uv {
+        (uv[0] / 16.0, uv[1] / 16.0, uv[2] / 16.0, uv[3] / 16.0)
+    } else {
+        match dir {
+            Direction::Up | Direction::Down => (from[0], from[2], to[0], to[2]),
+            Direction::North | Direction::South => (from[0], 1.0 - to[1], to[0], 1.0 - from[1]),
+            Direction::East | Direction::West => (from[2], 1.0 - to[1], to[2], 1.0 - from[1]),
+        }
+    };
+
+    let mut uvs = match dir {
+        Direction::Up => [
+            [u1, v2], [u2, v2], [u2, v1], [u1, v1],
+        ],
+        Direction::Down => [
+            [u1, v1], [u2, v1], [u2, v2], [u1, v2],
+        ],
+        Direction::North => [
+            [u1, v2], [u1, v1], [u2, v1], [u2, v2],
+        ],
+        Direction::South | Direction::West | Direction::East => [
+            [u2, v2], [u2, v1], [u1, v1], [u1, v2],
+        ],
+    };
+
+    if let Some(rot) = rotation {
+        let steps = ((rot % 360 + 360) % 360) / 90;
+        for _ in 0..steps {
+            uvs.rotate_right(1);
+        }
+    }
+
+    uvs
+}
+
+fn apply_element_rotation(mut positions: [[f32; 3]; 4], rotation: &Option<ElementRotation>) -> [[f32; 3]; 4] {
+    let Some(rot) = rotation else { return positions };
+
+    let origin = [rot.origin[0] / 16.0, rot.origin[1] / 16.0, rot.origin[2] / 16.0];
+    let angle_rad = rot.angle.to_radians();
+    let cos = angle_rad.cos();
+    let sin = angle_rad.sin();
+
+    for pos in &mut positions {
+        let dx = pos[0] - origin[0];
+        let dy = pos[1] - origin[1];
+        let dz = pos[2] - origin[2];
+
+        let (nx, ny, nz) = match rot.axis.as_str() {
+            "x" => (dx, cos * dy - sin * dz, sin * dy + cos * dz),
+            "y" => (cos * dx + sin * dz, dy, -sin * dx + cos * dz),
+            "z" => (cos * dx - sin * dy, sin * dx + cos * dy, dz),
+            _ => (dx, dy, dz),
+        };
+
+        if rot.rescale {
+            let scale = 1.0 / cos.abs();
+            pos[0] = origin[0] + nx * scale;
+            pos[1] = origin[1] + ny * scale;
+            pos[2] = origin[2] + nz * scale;
+        } else {
+            pos[0] = origin[0] + nx;
+            pos[1] = origin[1] + ny;
+            pos[2] = origin[2] + nz;
+        }
+    }
+
+    positions
+}
+
+fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
+    let center = 0.5f32;
+
+    if rot_x != 0 {
+        let angle = (rot_x as f32).to_radians();
+        let cos = angle.cos();
+        let sin = angle.sin();
+        for pos in &mut positions {
+            let dy = pos[1] - center;
+            let dz = pos[2] - center;
+            pos[1] = center + cos * dy - sin * dz;
+            pos[2] = center + sin * dy + cos * dz;
+        }
+    }
+
+    if rot_y != 0 {
+        let angle = (rot_y as f32).to_radians();
+        let cos = angle.cos();
+        let sin = angle.sin();
+        for pos in &mut positions {
+            let dx = pos[0] - center;
+            let dz = pos[2] - center;
+            pos[0] = center + cos * dx + sin * dz;
+            pos[2] = center - sin * dx + cos * dz;
+        }
+    }
+
+    positions
 }
 
 fn build_face_textures(block_name: &str, textures: &HashMap<String, String>) -> Option<FaceTextures> {

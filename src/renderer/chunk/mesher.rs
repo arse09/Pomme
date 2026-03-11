@@ -3,7 +3,8 @@ use std::sync::Arc;
 use azalea_core::position::ChunkPos;
 
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
-use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
+use crate::world::block::model::{BakedModel, Direction};
+use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::chunk::{self, ChunkStore};
 
 #[repr(C)]
@@ -15,111 +16,14 @@ pub struct ChunkVertex {
     pub tint: [f32; 3],
 }
 
-
 pub struct ChunkMeshData {
     pub pos: ChunkPos,
     pub vertices: Vec<ChunkVertex>,
     pub indices: Vec<u32>,
 }
 
-struct Face {
-    positions: [[f32; 3]; 4],
-    uvs: [[f32; 2]; 4],
-    offset: [i32; 3],
-    light: f32,
-}
-
-const FACES: [Face; 6] = [
-    // Top (Y+): viewed from above, +X right, -Z up
-    Face {
-        positions: [
-            [0.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ],
-        uvs: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-        offset: [0, 1, 0],
-        light: 1.0,
-    },
-    // Bottom (Y-): viewed from below, +X right, +Z up
-    Face {
-        positions: [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0],
-        ],
-        uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-        offset: [0, -1, 0],
-        light: 0.5,
-    },
-    // North (Z-): viewed from -Z, +X right, +Y up
-    Face {
-        positions: [
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [1.0, 0.0, 0.0],
-        ],
-        uvs: [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
-        offset: [0, 0, -1],
-        light: 0.7,
-    },
-    // South (Z+): viewed from +Z, +X left, +Y up
-    Face {
-        positions: [
-            [1.0, 0.0, 1.0],
-            [1.0, 1.0, 1.0],
-            [0.0, 1.0, 1.0],
-            [0.0, 0.0, 1.0],
-        ],
-        uvs: [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
-        offset: [0, 0, 1],
-        light: 0.7,
-    },
-    // East (X+): viewed from +X, -Z right, +Y up
-    Face {
-        positions: [
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [1.0, 1.0, 1.0],
-            [1.0, 0.0, 1.0],
-        ],
-        uvs: [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
-        offset: [1, 0, 0],
-        light: 0.8,
-    },
-    // West (X-): viewed from -X, +Z right, +Y up
-    Face {
-        positions: [
-            [0.0, 0.0, 1.0],
-            [0.0, 1.0, 1.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0],
-        ],
-        uvs: [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
-        offset: [-1, 0, 0],
-        light: 0.8,
-    },
-];
-
-fn face_texture(textures: &FaceTextures, face_idx: usize) -> &str {
-    match face_idx {
-        0 => &textures.top,
-        1 => &textures.bottom,
-        2 => &textures.north,
-        3 => &textures.south,
-        4 => &textures.east,
-        _ => &textures.west,
-    }
-}
-
 const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
-// TODO: Replace hardcoded tints with biome colormap sampling (grass.png/foliage.png)
-// Plains biome: grass.png at temp=0.8, downfall=0.4 → #91BD59
 const GRASS_TINT: [f32; 3] = [0.569, 0.741, 0.349];
-// Plains biome: foliage.png at temp=0.8, downfall=0.4 → #77AB2F
 const FOLIAGE_TINT: [f32; 3] = [0.467, 0.671, 0.184];
 
 fn tint_color(tint: Tint) -> [f32; 3] {
@@ -246,37 +150,20 @@ fn mesh_chunk_snapshot(
                     continue;
                 }
 
-                let textures = match registry.get_textures(state) {
-                    Some(t) => t,
-                    None => continue,
-                };
-
                 let block_pos = [bx as f32, by as f32, bz as f32];
 
-                let tint = tint_color(textures.tint);
-                let is_side = |idx: usize| idx >= 2;
-
-                for (i, face) in FACES.iter().enumerate() {
-                    let neighbor = snapshot.get_block_state(
-                        bx + face.offset[0],
-                        by + face.offset[1],
-                        bz + face.offset[2],
+                if let Some(baked) = registry.get_baked_model(state) {
+                    emit_baked_model(
+                        &mut vertices, &mut indices,
+                        block_pos, baked, snapshot, registry, uv_map,
+                        bx, by, bz,
                     );
-                    if neighbor.is_air() {
-                        let tex_name = face_texture(textures, i);
-                        let region = uv_map.get_region(tex_name);
-
-                        if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side(i)) {
-                            emit_face(&mut vertices, &mut indices, block_pos, face, region, WHITE);
-                            let overlay_region = uv_map.get_region(overlay);
-                            emit_face(&mut vertices, &mut indices, block_pos, face, overlay_region, tint);
-                        } else {
-                            let is_tinted_face = !matches!(textures.tint, Tint::None)
-                                && (textures.side_overlay.is_none() || i == 0);
-                            let face_tint = if is_tinted_face { tint } else { WHITE };
-                            emit_face(&mut vertices, &mut indices, block_pos, face, region, face_tint);
-                        }
-                    }
+                } else if let Some(textures) = registry.get_textures(state) {
+                    emit_cube_faces(
+                        &mut vertices, &mut indices,
+                        block_pos, textures, snapshot, registry, uv_map,
+                        bx, by, bz,
+                    );
                 }
             }
         }
@@ -289,35 +176,149 @@ fn mesh_chunk_snapshot(
     }
 }
 
+fn emit_baked_model(
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+    block_pos: [f32; 3],
+    model: &BakedModel,
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    uv_map: &AtlasUVMap,
+    bx: i32, by: i32, bz: i32,
+) {
+    for quad in &model.quads {
+        if let Some(cullface) = quad.cullface {
+            let offset = cullface.offset();
+            let neighbor = snapshot.get_block_state(
+                bx + offset[0], by + offset[1], bz + offset[2],
+            );
+            if registry.is_opaque_full_cube(neighbor) {
+                continue;
+            }
+        }
+
+        let region = uv_map.get_region(&quad.texture);
+        let tint = if quad.tinted { GRASS_TINT } else { WHITE };
+        emit_face(vertices, indices, block_pos, &quad.positions, &quad.uvs, quad.shade_light, region, tint);
+    }
+}
+
+fn emit_cube_faces(
+    vertices: &mut Vec<ChunkVertex>,
+    indices: &mut Vec<u32>,
+    block_pos: [f32; 3],
+    textures: &crate::world::block::registry::FaceTextures,
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    uv_map: &AtlasUVMap,
+    bx: i32, by: i32, bz: i32,
+) {
+    let tint = tint_color(textures.tint);
+
+    for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
+        let offset = dir.offset();
+        let neighbor = snapshot.get_block_state(
+            bx + offset[0], by + offset[1], bz + offset[2],
+        );
+        if registry.is_opaque_full_cube(neighbor) {
+            continue;
+        }
+
+        let face_tex = match i {
+            0 => &textures.top,
+            1 => &textures.bottom,
+            2 => &textures.north,
+            3 => &textures.south,
+            4 => &textures.east,
+            _ => &textures.west,
+        };
+        let region = uv_map.get_region(face_tex);
+        let (positions, uvs, light) = cube_face_geometry(*dir);
+
+        let is_side = i >= 2;
+        if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
+            emit_face(vertices, indices, block_pos, &positions, &uvs, light, region, WHITE);
+            let overlay_region = uv_map.get_region(overlay);
+            emit_face(vertices, indices, block_pos, &positions, &uvs, light, overlay_region, tint);
+        } else {
+            let is_tinted = !matches!(textures.tint, Tint::None)
+                && (textures.side_overlay.is_none() || i == 0);
+            let face_tint = if is_tinted { tint } else { WHITE };
+            emit_face(vertices, indices, block_pos, &positions, &uvs, light, region, face_tint);
+        }
+    }
+}
+
+const CUBE_FACE_DIRS: [Direction; 6] = [
+    Direction::Up, Direction::Down,
+    Direction::North, Direction::South,
+    Direction::East, Direction::West,
+];
+
 fn emit_face(
     vertices: &mut Vec<ChunkVertex>,
     indices: &mut Vec<u32>,
     block_pos: [f32; 3],
-    face: &Face,
+    positions: &[[f32; 3]; 4],
+    uvs: &[[f32; 2]; 4],
+    light: f32,
     region: AtlasRegion,
     tint: [f32; 3],
 ) {
     let base = vertices.len() as u32;
-
     let u_span = region.u_max - region.u_min;
     let v_span = region.v_max - region.v_min;
 
-    for (i, pos) in face.positions.iter().enumerate() {
-        let uv = face.uvs[i];
+    for i in 0..4 {
         vertices.push(ChunkVertex {
             position: [
-                block_pos[0] + pos[0],
-                block_pos[1] + pos[1],
-                block_pos[2] + pos[2],
+                block_pos[0] + positions[i][0],
+                block_pos[1] + positions[i][1],
+                block_pos[2] + positions[i][2],
             ],
             tex_coords: [
-                region.u_min + uv[0] * u_span,
-                region.v_min + uv[1] * v_span,
+                region.u_min + uvs[i][0] * u_span,
+                region.v_min + uvs[i][1] * v_span,
             ],
-            light: face.light,
+            light,
             tint,
         });
     }
 
     indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+}
+
+fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4], f32) {
+    match dir {
+        Direction::Up => (
+            [[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+            1.0,
+        ),
+        Direction::Down => (
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            0.5,
+        ),
+        Direction::North => (
+            [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+            0.7,
+        ),
+        Direction::South => (
+            [[1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0]],
+            [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
+            0.7,
+        ),
+        Direction::East => (
+            [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 1.0]],
+            [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
+            0.8,
+        ),
+        Direction::West => (
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
+            [[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
+            0.8,
+        ),
+    }
 }
