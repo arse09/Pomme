@@ -22,28 +22,26 @@ POMC is in active early development, working through milestones toward a fully p
 | 5 | Player physics + collision | Done |
 | 6 | HUD, chat, inventory | Done |
 | 7 | Main menu, server list, settings | Done |
-| 8 | Vulkan renderer migration | In progress |
+| 8 | Vulkan renderer (ash + gpu-allocator) | Done |
 | 9 | GPU-driven rendering | Planned |
 
 ## Building
 
-Requires **Rust nightly** and vanilla 1.21.11 assets.
+Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and a Rust toolchain.
 
 ```bash
-# Set up nightly toolchain
-rustup override set nightly
-
-# Extract vanilla assets (needed for block textures)
-unzip ~/.minecraft/versions/1.21.11/1.21.11.jar -d reference/assets/
-
-# Build
 cargo build --release
 ```
+
+Assets are automatically downloaded on first run — no manual setup needed.
 
 ## Running
 
 ```bash
-# Connect to a server
+# Launch the client (opens main menu)
+cargo run --release
+
+# Connect directly to a server
 cargo run --release -- --server localhost:25565 --username Steve
 
 # With authentication (for online-mode servers)
@@ -53,6 +51,18 @@ cargo run --release -- \
   --uuid <your-uuid> \
   --access-token <your-token>
 ```
+
+### Optional flags
+
+| Flag | Description |
+|------|-------------|
+| `--server <host:port>` | Connect directly to a server |
+| `--username <name>` | Player name (default: Steve) |
+| `--uuid <uuid>` | Player UUID for authenticated sessions |
+| `--access-token <token>` | Minecraft auth token |
+| `--game-dir <path>` | Override data directory |
+| `--assets-dir <path>` | Override assets directory |
+| `--version <ver>` | MC version for asset download (default: 1.21.11) |
 
 ## Tech Stack
 
@@ -64,14 +74,11 @@ cargo run --release -- \
 | Math | `glam` |
 | Protocol | `azalea-protocol` |
 | Async runtime | `tokio` |
-| UI | `egui` |
 | Textures | `png`, `image` |
-| Audio | `kira` |
-
-## Contributing
-
-See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for setup instructions and guidelines.
+| Parallel meshing | `rayon` |
+| Font rendering | `fontdue` |
+| Shader compilation | `shaderc` |
 
 ## License
 
-This project is not affiliated with Mojang or Microsoft.
+GPL-3.0-or-later. This project is not affiliated with Mojang or Microsoft.
