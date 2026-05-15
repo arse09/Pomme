@@ -35,10 +35,10 @@ use thiserror::Error;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
+use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
-use crate::window::input::InputState;
 use crate::world::block::registry::BlockRegistry;
 
 #[derive(Error, Debug)]

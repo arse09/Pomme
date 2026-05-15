@@ -93,7 +93,7 @@ Running the standalone client requires minecraft assets, for which you have 2 op
 1. Run the launcher and install the latest supported release. Then you can do:
 
    ```bash
-   pnpm client:dev -- --username Steve --quick-access-server localhost
+   pnpm client:dev -- --username Steve --quick-access-multiplayer localhost
    ```
 
    or with cargo:
