@@ -161,7 +161,7 @@ impl AppCore {
         let captured = game.is_some_and(|g| {
             !g.paused
                 && !g.dead
-                && !g.inventory_open
+                && !g.gui_open()
                 && !g.chat.is_open()
                 && self.input.is_cursor_captured()
         });
@@ -262,6 +262,7 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
                     game.chunk_store.unload_chunk(&pos);
+                    game.block_entity_anim.drop_chunk(pos.x, pos.z);
                     game.meshed_lod.remove(&pos);
 
                     renderer.remove_chunk_mesh(&pos);
@@ -427,9 +428,65 @@ impl AppCore {
                         }
                     }
                 }
+                NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
+                    game.chunk_store.block_entities.retain(|p, _| {
+                        p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
+                    });
+                    game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
+                    for (pos, kind, nbt) in entries {
+                        game.chunk_store.block_entities.insert(
+                            pos,
+                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                        );
+                    }
+                }
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => match nbt {
+                    Some(nbt) => {
+                        let chunk_pos = azalea_core::position::ChunkPos::new(
+                            pos.x.div_euclid(16),
+                            pos.z.div_euclid(16),
+                        );
+                        if game.chunk_store.get_chunk(&chunk_pos).is_some() {
+                            game.chunk_store.block_entities.insert(
+                                pos,
+                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
+                            );
+                        }
+                    }
+                    None => {
+                        game.chunk_store.block_entities.remove(&pos);
+                    }
+                },
+                NetworkEvent::BlockEvent {
+                    pos,
+                    action_id,
+                    action_parameter,
+                } => {
+                    // Action 1 for chest/shulker = open-viewer count.
+                    if action_id == 1 {
+                        game.block_entity_anim.set_open_count(pos, action_parameter);
+                    }
+                }
                 NetworkEvent::GameModeChanged { game_mode } => {
                     tracing::info!("Game mode changed to {game_mode}");
                     game.player.game_mode = game_mode;
+                    if game.inventory_open || game.creative_inventory_open {
+                        match game_mode {
+                            1 => {
+                                game.inventory_open = false;
+                                game.creative_inventory_open = true;
+                            }
+                            3 => {
+                                game.inventory_open = false;
+                                game.creative_inventory_open = false;
+                                self.apply_cursor_grab(window, Some(game));
+                            }
+                            _ => {
+                                game.inventory_open = true;
+                                game.creative_inventory_open = false;
+                            }
+                        }
+                    }
                 }
                 NetworkEvent::ServerViewDistance { distance } => {
                     tracing::info!("Server view distance: {distance}");
@@ -729,7 +786,7 @@ impl AppCore {
         self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
 
-        if !game.paused && !game.inventory_open && !game.chat.is_open() {
+        if !game.paused && !game.gui_open() && !game.chat.is_open() {
             let eye_pos = game.player.position + glam::Vec3::new(0.0, 1.62, 0.0);
             game.interaction.update_target(
                 eye_pos,
