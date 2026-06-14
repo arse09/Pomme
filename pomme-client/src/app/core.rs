@@ -831,7 +831,7 @@ impl AppCore {
 
         // Open menus only release the keys; the simulation keeps ticking.
         let input_live = game.input_live();
-        let neutral = InputState::released();
+        let mut neutral = InputState::released();
         let input = if input_live { &self.input } else { &neutral };
 
         game.player.prev_look_dir = game.player.look_dir;
@@ -867,15 +867,18 @@ impl AppCore {
             game.player.game_mode == 1,
         );
 
-        let dirty = game.interaction.tick(
-            input,
-            &game.chunk_store,
-            &connection.packet_tx,
-            &self.audio,
-            game.player.position.into(),
-            game.player.on_ground,
-            game.player.game_mode == 1,
-        );
+        let dirty = {
+            let input = if input_live { &mut self.input } else { &mut neutral };
+            game.interaction.tick(
+                input,
+                &game.chunk_store,
+                &connection.packet_tx,
+                &self.audio,
+                game.player.position.into(),
+                game.player.on_ground,
+                game.player.game_mode == 1,
+            )
+        };
         for pos in dirty {
             game.mesh_dispatcher.enqueue(&game.chunk_store, pos, 0);
         }

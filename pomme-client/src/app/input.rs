@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::thread;
+use std::time::Duration;
 
+use gilrs::ff::{BaseEffect, EffectBuilder, Replay};
 use gilrs::{Button, GamepadId, Gilrs};
 use winit::event::{ElementState, Modifiers, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::app::TICK_RATE_MS;
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
 
@@ -44,7 +48,7 @@ pub struct InputState {
     copy_pressed: bool,
     cut_pressed: bool,
     undo_pressed: bool,
-    controller_manager: Option<Gilrs>,
+    gamepad_manager: Option<Gilrs>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
 }
@@ -77,7 +81,7 @@ impl InputState {
         }
     }
 
-    fn with_controller(controller_manager: Option<Gilrs>) -> Self {
+    fn with_controller(gamepad_manager: Option<Gilrs>) -> Self {
         Self {
             pressed: HashSet::new(),
             modifiers: Modifiers::default(),
@@ -99,14 +103,14 @@ impl InputState {
             copy_pressed: false,
             cut_pressed: false,
             undo_pressed: false,
-            controller_manager,
+            gamepad_manager,
             active_gamepad_id: None,
             recent_actions: HashMap::new(),
         }
     }
 
     pub fn update(&mut self, phase: &mut StateSlot<AppPhase>) -> bool {
-        let events: Vec<gilrs::Event> = match self.controller_manager.as_mut() {
+        let events: Vec<gilrs::Event> = match self.gamepad_manager.as_mut() {
             Some(manager) => std::iter::from_fn(|| manager.next_event()).collect(),
             None => Vec::new(),
         };
@@ -169,7 +173,7 @@ impl InputState {
     }
 
     pub fn get_active_gamepad(&self) -> Option<gilrs::Gamepad<'_>> {
-        let manager = self.controller_manager.as_ref()?;
+        let manager = self.gamepad_manager.as_ref()?;
         self.active_gamepad_id.map(|id| manager.gamepad(id))
     }
 
@@ -313,6 +317,35 @@ impl InputState {
 
     pub fn key_pressed(&self, key: KeyCode) -> bool {
         self.pressed.contains(&key)
+    }
+
+    pub fn vibrate_gamepad_for_tick(&mut self) -> std::result::Result<(), gilrs::ff::Error> {
+        if let Some(ref mut manager) = self.gamepad_manager {
+            let ff_supported = manager
+                .gamepads()
+                .filter_map(|(id, gp)| if gp.is_ff_supported() { Some(id) } else { None })
+                .collect::<Vec<_>>();
+
+            let duration = gilrs::ff::Ticks::from_ms(TICK_RATE_MS + 50);
+
+            let r = EffectBuilder::new()
+                .add_effect(BaseEffect {
+                    kind: gilrs::ff::BaseEffectType::Strong { magnitude: 60_000 },
+                    scheduling: Replay {
+                        play_for: duration,
+                        ..Default::default()
+                    },
+                    envelope: Default::default(),
+                })
+                .gamepads(&ff_supported)
+                .finish(manager)
+                .unwrap();
+
+            r.play().unwrap();
+            thread::sleep(Duration::from_millis(TICK_RATE_MS as u64));
+        }
+
+        Ok(())
     }
 
     pub fn on_key_event(&mut self, event: &winit::event::KeyEvent) {

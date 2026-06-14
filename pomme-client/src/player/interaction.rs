@@ -271,7 +271,7 @@ impl InteractionState {
     #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
-        input: &InputState,
+        input: &mut InputState,
         chunks: &ChunkStore,
         sender: &PacketSender,
         audio: &AudioEngine,
@@ -316,6 +316,10 @@ impl InteractionState {
         } else {
             self.miss_time = 0;
             self.stop_destroying(sender);
+        }
+
+        if self.is_destroying {
+            let _ = input.vibrate_gamepad_for_tick();
         }
 
         if input.action_just_pressed(input::Action::Use)

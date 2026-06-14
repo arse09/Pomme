@@ -38,6 +38,7 @@ pub enum WindowError {
 }
 
 const TICK_RATE: f32 = 1.0 / 20.0;
+const TICK_RATE_MS: u32 = 1000 / 20;
 const DEFAULT_RENDER_DISTANCE: u32 = 12;
 const POSITION_SEND_INTERVAL: u32 = 20;
 const POSITION_THRESHOLD_SQ: f64 = 4.0e-8;
